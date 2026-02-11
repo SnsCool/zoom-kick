@@ -1,0 +1,17 @@
+node_modules
+.next
+.env
+.env.local
+.env*.local
+.git
+.gitignore
+Dockerfile
+docker-compose.yml
+fly.toml
+README.md
+SPEC.md
+CLAUDE.md
+.DS_Store
+*.pem
+npm-debug.log*
+supabase/.temp
