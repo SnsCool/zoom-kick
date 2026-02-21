@@ -39,15 +39,15 @@ export class ZoomModBot {
       this.config.bannedUsers.forEach(u => this.bannedUsernames.add(u.zoom_username));
       console.log(`[Bot] Loaded ${this.config.bannedUsers.length} banned users from Supabase.`);
 
-      // Google Sheets ロガー初期化
+      // Google Sheets ロガー初期化（失敗してもBot自体は継続）
       if (this.config.sheetsSync) {
         const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
         if (spreadsheetId) {
-          this.sheetsLogger = new GoogleSheetsLogger(spreadsheetId);
-          await this.sheetsLogger.init();
-          console.log('[Bot] Google Sheets Logger initialized.');
-
           try {
+            this.sheetsLogger = new GoogleSheetsLogger(spreadsheetId);
+            await this.sheetsLogger.init();
+            console.log('[Bot] Google Sheets Logger initialized.');
+
             const sheetsBannedUsers = await this.sheetsLogger.getBannedUsers();
             let newFromSheets = 0;
             for (const user of sheetsBannedUsers) {
@@ -66,7 +66,8 @@ export class ZoomModBot {
             }
             console.log(`[Bot] Merged ${sheetsBannedUsers.length} users from Sheets (${newFromSheets} new).`);
           } catch (e) {
-            console.error('[Bot] Failed to load banned users from Sheets:', e);
+            console.error('[Bot] Google Sheets 初期化に失敗しましたが、Bot は継続します:', e);
+            this.sheetsLogger = null;
           }
         }
       }
