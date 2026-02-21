@@ -18,12 +18,6 @@ interface Log {
   matchNgWord?: string | null
 }
 
-interface ApiResponse {
-  logs: Log[]
-  totalPages: number
-  currentPage: number
-}
-
 export default function LogTable() {
   const [logs, setLogs] = useState<Log[]>([])
   const [currentPage, setCurrentPage] = useState(1)
@@ -35,21 +29,35 @@ export default function LogTable() {
   const fetchLogs = useCallback(async (page: number, actionFilter: Action) => {
     setLoading(true)
     try {
+      const limit = 50
+      const offset = (page - 1) * limit
       const params = new URLSearchParams({
-        page: page.toString(),
-        limit: '50',
+        limit: limit.toString(),
+        offset: offset.toString(),
       })
-      
+
       if (actionFilter !== 'all') {
         params.append('action', actionFilter)
       }
 
       const res = await fetch(`/api/logs?${params.toString()}`)
       if (!res.ok) throw new Error('Failed to fetch logs')
-      
-      const data: ApiResponse = await res.json()
-      setLogs(data.logs)
-      setTotalPages(data.totalPages)
+
+      const data = await res.json()
+      const items = (data.logs || []).map((l: Record<string, unknown>) => ({
+        id: l.id,
+        timestamp: l.created_at ? new Date(l.created_at as string).toLocaleString('ja-JP') : '',
+        username: l.username || '',
+        message: l.message || '',
+        action: l.action || '',
+        method: (l.detection_method || '') as Method,
+        aiScore: l.ai_score as number | null,
+        aiReason: l.ai_reason as string | null,
+        matchNgWord: l.matched_word as string | null,
+      }))
+      setLogs(items)
+      const total = data.total || 0
+      setTotalPages(Math.max(1, Math.ceil(total / limit)))
     } catch (error) {
       console.error(error)
     } finally {

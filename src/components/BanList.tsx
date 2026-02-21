@@ -37,7 +37,18 @@ const BanList = () => {
       const res = await fetch('/api/blacklist')
       if (!res.ok) throw new Error('Failed to fetch')
       const data = await res.json()
-      setBans(data)
+      const items = (data.blacklist || []).map((b: Record<string, unknown>) => ({
+        id: b.id as string,
+        username: (b.zoom_username || '') as string,
+        email: (b.zoom_email || '') as string,
+        reason: (b.reason || '') as string,
+        bannedAt: (b.banned_at || '') as string,
+        type: (b.ban_type || 'permanent') as BanType,
+        expiresAt: (b.expires_at || '') as string,
+        webinar: (b.webinar_name || b.webinar_id || '') as string,
+        sheetsSync: b.sheets_synced as boolean || false,
+      }))
+      setBans(items)
     } catch (err) {
       setError('Error loading ban list')
       console.error(err)
@@ -57,7 +68,12 @@ const BanList = () => {
       const res = await fetch('/api/blacklist', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(formData)
+        body: JSON.stringify({
+          zoom_username: formData.username,
+          zoom_email: formData.email || null,
+          reason: formData.reason,
+          ban_type: formData.type,
+        })
       })
       if (!res.ok) throw new Error('Failed to add ban')
       await fetchBans()
@@ -93,7 +109,7 @@ const BanList = () => {
       const res = await fetch('/api/blacklist', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id, type: newType })
+        body: JSON.stringify({ id, ban_type: newType })
       })
       if (!res.ok) throw new Error('Failed to update ban')
       await fetchBans()

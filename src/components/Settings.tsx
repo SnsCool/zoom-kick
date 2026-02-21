@@ -25,8 +25,15 @@ const Settings = () => {
       try {
         const res = await fetch('/api/settings')
         if (res.ok) {
-          const data: SettingsData = await res.json()
-          setSettings(data)
+          const data = await res.json()
+          const s = data.settings || {}
+          setSettings({
+            ai_threshold: s.ai_threshold?.value ?? 0.7,
+            auto_delete: s.auto_delete?.value ?? true,
+            auto_kick: s.auto_kick?.value ?? true,
+            block_reentry: s.block_reentry?.value ?? true,
+            sheets_sync: s.sheets_sync?.value ?? true,
+          })
         }
       } catch (error) {
         console.error('Failed to fetch settings:', error)
@@ -38,21 +45,24 @@ const Settings = () => {
 
   const handleSave = async () => {
     try {
-      const res = await fetch('/api/settings', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(settings),
-      })
+      const entries = Object.entries(settings)
+      const results = await Promise.all(
+        entries.map(([key, value]) =>
+          fetch('/api/settings', {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ key, value: { value } }),
+          })
+        )
+      )
 
-      if (res.ok) {
+      if (results.every((r) => r.ok)) {
         setIsToastVisible(true)
         setTimeout(() => {
           setIsToastVisible(false)
         }, 3000)
       } else {
-        console.error('Failed to save settings')
+        console.error('Failed to save some settings')
       }
     } catch (error) {
       console.error('Error saving settings:', error)

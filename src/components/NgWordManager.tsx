@@ -61,7 +61,15 @@ export default function NgWordManager() {
       const res = await fetch('/api/ng-words')
       if (!res.ok) throw new Error('Failed to fetch')
       const data = await res.json()
-      setWords(data)
+      const items = (data.ngWords || []).map((w: Record<string, unknown>) => ({
+        id: w.id as string,
+        word: (w.word || '') as string,
+        category: (w.category || 'general') as Category,
+        priority: (w.severity || 'medium') as Priority,
+        isRegex: w.is_regex as boolean || false,
+        createdAt: (w.created_at || '') as string,
+      }))
+      setWords(items)
     } catch (err) {
       setError('NGワードの取得に失敗しました')
       console.error(err)
@@ -88,8 +96,8 @@ export default function NgWordManager() {
         body: JSON.stringify({
           word: newWord,
           category,
-          priority,
-          isRegex
+          severity: priority,
+          is_regex: isRegex,
         })
       })
 
@@ -114,8 +122,10 @@ export default function NgWordManager() {
     setIsLoading(true)
     setError(null)
     try {
-      const res = await fetch(`/api/ng-words?id=${encodeURIComponent(id)}`, {
-        method: 'DELETE'
+      const res = await fetch('/api/ng-words', {
+        method: 'DELETE',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id }),
       })
 
       if (!res.ok) throw new Error('Failed to delete')

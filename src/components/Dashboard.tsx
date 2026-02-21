@@ -36,12 +36,15 @@ export default function Dashboard() {
       const res = await fetch('/api/logs')
       if (res.ok) {
         const data = await res.json()
-        // APIの仕様に合わせて調整が必要ですが、ここでは仮の構造とします
+        const logs = data.logs || []
+        const banned = logs.filter((l: Record<string, string>) => l.action === 'kicked').length
+        const deleted = logs.filter((l: Record<string, string>) => l.action === 'deleted').length
+        const passed = logs.filter((l: Record<string, string>) => l.action === 'passed').length
         setStats({
           processed: data.total || 0,
-          banned: data.banned || 0,
-          deleted: data.deleted || 0,
-          passed: data.passed || 0,
+          banned,
+          deleted,
+          passed,
         })
       }
     } catch (error) {
@@ -55,7 +58,11 @@ export default function Dashboard() {
       const res = await fetch('/api/bot/status')
       if (res.ok) {
         const data = await res.json()
-        setBotStatus(data)
+        setBotStatus({
+          is_running: data.isRunning || false,
+          webinar_id: data.webinarId || null,
+          started_at: data.startedAt || null,
+        })
       }
     } catch (error) {
       console.error('Failed to fetch bot status:', error)
@@ -68,7 +75,15 @@ export default function Dashboard() {
       const res = await fetch('/api/logs?limit=10')
       if (res.ok) {
         const data = await res.json()
-        setLogs(data)
+        const items = (data.logs || []).map((l: Record<string, unknown>) => ({
+          id: l.id,
+          created_at: l.created_at,
+          username: l.username,
+          message: l.message || '',
+          action: l.action,
+          method: l.detection_method || '',
+        }))
+        setLogs(items)
       }
     } catch (error) {
       console.error('Failed to fetch logs:', error)
