@@ -1,6 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react';
+import { parseZoomUrl, isValidZoomId } from '@/lib/zoom-url-parser';
 
 type BotStatus = {
   isRunning: boolean;
@@ -10,6 +11,8 @@ type BotStatus = {
   webinarName: string | null;
 };
 
+type InputMode = 'url' | 'id';
+
 export default function BotControl() {
   const [status, setStatus] = useState<BotStatus>({
     isRunning: false,
@@ -18,11 +21,15 @@ export default function BotControl() {
     webinarId: null,
     webinarName: null,
   });
-  
+
+  // Input Mode State
+  const [inputMode, setInputMode] = useState<InputMode>('url');
+
   // Form state
+  const [inputWebinarUrl, setInputWebinarUrl] = useState('');
   const [inputWebinarId, setInputWebinarId] = useState('');
   const [inputWebinarName, setInputWebinarName] = useState('');
-  
+
   // Loading states for buttons
   const [isStarting, setIsStarting] = useState(false);
   const [isStopping, setIsStopping] = useState(false);
@@ -50,7 +57,28 @@ export default function BotControl() {
   // Start Bot Handler
   const handleStart = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!inputWebinarId) return;
+
+    let finalWebinarId: string | null = null;
+
+    if (inputMode === 'url') {
+      const trimmedUrl = inputWebinarUrl.trim();
+      if (!trimmedUrl) return;
+      const result = parseZoomUrl(trimmedUrl);
+      if (!result.webinarId) {
+        alert(result.error || 'URLの解析に失敗しました');
+        return;
+      }
+      finalWebinarId = result.webinarId;
+    } else {
+      if (!inputWebinarId) return;
+      finalWebinarId = inputWebinarId.replace(/-/g, '').trim();
+      if (!isValidZoomId(finalWebinarId)) {
+        alert('有効なZoom IDではありません（9〜11桁の数字）');
+        return;
+      }
+    }
+
+    if (!finalWebinarId) return;
 
     setIsStarting(true);
     try {
@@ -58,12 +86,13 @@ export default function BotControl() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          webinarId: inputWebinarId,
+          webinarId: finalWebinarId,
           webinarName: inputWebinarName,
         }),
       });
       if (res.ok) {
         fetchStatus();
+        setInputWebinarUrl('');
         setInputWebinarId('');
         setInputWebinarName('');
       } else {
@@ -97,10 +126,14 @@ export default function BotControl() {
     }
   };
 
+  // URL解析結果のプレビュー
+  const urlParseResult = inputMode === 'url' && inputWebinarUrl ? parseZoomUrl(inputWebinarUrl) : null;
+
   return (
     <div className="bg-[#111827] rounded-lg p-6 border border-gray-800 shadow-xl max-w-2xl mx-auto">
+      {/* Header */}
       <div className="flex items-center justify-between mb-8">
-        <h2 className="text-2xl font-bold text-white">ReactBot コントロールパネル</h2>
+        <h2 className="text-2xl font-bold text-white">Bot コントロールパネル</h2>
         <div className="flex items-center gap-3">
             {status.isRunning ? (
                 <>
@@ -124,7 +157,7 @@ export default function BotControl() {
         <div className="bg-gray-800/50 p-4 rounded border border-gray-700">
             <p className="text-gray-400 text-xs uppercase tracking-wider mb-1">現在のウェビナー</p>
             <p className="text-white font-semibold truncate" title={status.webinarName || undefined}>
-                {status.webinarName || 'なし'} 
+                {status.webinarName || 'なし'}
                 {status.webinarId && <span className="text-gray-500 text-sm ml-2">(ID: {status.webinarId})</span>}
             </p>
         </div>
@@ -148,19 +181,81 @@ export default function BotControl() {
             <svg className="w-5 h-5 text-green-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z"></path></svg>
             Bot起動
         </h3>
+
+        {/* Mode Switcher */}
+        <div className="flex bg-gray-900 rounded-lg p-1 mb-6 border border-gray-800">
+            <button
+                type="button"
+                onClick={() => setInputMode('url')}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
+                    inputMode === 'url'
+                    ? 'bg-gray-700 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200'
+                }`}
+                disabled={status.isRunning || isStarting}
+            >
+                URLから起動
+            </button>
+            <button
+                type="button"
+                onClick={() => setInputMode('id')}
+                className={`flex-1 py-2 text-sm font-medium rounded-md transition-all ${
+                    inputMode === 'id'
+                    ? 'bg-gray-700 text-white shadow-sm'
+                    : 'text-gray-400 hover:text-gray-200'
+                }`}
+                disabled={status.isRunning || isStarting}
+            >
+                IDを直接入力
+            </button>
+        </div>
+
+        {/* Input Fields */}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <div>
-                <label className="block text-gray-400 text-sm font-medium mb-2">ウェビナーID <span className="text-red-500">*</span></label>
-                <input
-                    type="text"
-                    value={inputWebinarId}
-                    onChange={(e) => setInputWebinarId(e.target.value)}
-                    className="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white focus:ring-2 focus:ring-green-600 focus:border-transparent outline-none transition"
-                    placeholder="例: 123-456-789"
-                    disabled={status.isRunning || isStarting}
-                    required
-                />
+                {inputMode === 'url' ? (
+                    <>
+                        <label className="block text-gray-400 text-sm font-medium mb-2">Zoom URL <span className="text-red-500">*</span></label>
+                        <textarea
+                            value={inputWebinarUrl}
+                            onChange={(e) => setInputWebinarUrl(e.target.value)}
+                            className="w-full h-24 bg-gray-800 border border-gray-700 rounded p-2.5 text-white focus:ring-2 focus:ring-green-600 focus:border-transparent outline-none transition resize-none"
+                            placeholder="https://zoom.us/j/123456789..."
+                            disabled={status.isRunning || isStarting}
+                        />
+                        {inputWebinarUrl && (
+                            <div className="mt-2 min-h-[20px]">
+                                {urlParseResult?.webinarId ? (
+                                    <p className="text-green-400 text-xs flex items-center gap-1">
+                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                                        抽出されたID: <span className="font-mono font-bold">{urlParseResult.webinarId}</span>
+                                    </p>
+                                ) : (
+                                    <p className="text-red-400 text-xs flex items-center gap-1">
+                                        <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+                                        {urlParseResult?.error || 'IDを検出できません'}
+                                    </p>
+                                )}
+                            </div>
+                        )}
+                    </>
+                ) : (
+                    <>
+                        <label className="block text-gray-400 text-sm font-medium mb-2">ウェビナーID <span className="text-red-500">*</span></label>
+                        <input
+                            type="text"
+                            value={inputWebinarId}
+                            onChange={(e) => setInputWebinarId(e.target.value)}
+                            className="w-full bg-gray-800 border border-gray-700 rounded p-2.5 text-white focus:ring-2 focus:ring-green-600 focus:border-transparent outline-none transition"
+                            placeholder="例: 123-456-789"
+                            disabled={status.isRunning || isStarting}
+                            required
+                        />
+                        <p className="text-gray-500 text-xs mt-1">ハイフンあり・なし両方対応</p>
+                    </>
+                )}
             </div>
+
             <div>
                 <label className="block text-gray-400 text-sm font-medium mb-2">ウェビナー名</label>
                 <input
@@ -173,10 +268,11 @@ export default function BotControl() {
                 />
             </div>
         </div>
+
         <div className="mt-4 text-right">
             <button
                 type="submit"
-                disabled={status.isRunning || isStarting}
+                disabled={status.isRunning || isStarting || (inputMode === 'url' && !urlParseResult?.webinarId)}
                 className="bg-green-600 hover:bg-green-500 text-white font-semibold py-2 px-6 rounded shadow-lg shadow-green-900/20 transition-all disabled:opacity-50 disabled:cursor-not-allowed transform active:scale-95"
             >
                 {isStarting ? '起動中...' : '起動'}
