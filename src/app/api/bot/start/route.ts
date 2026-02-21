@@ -10,8 +10,8 @@ export async function POST(req: Request) {
     const body = await req.json()
     const { webinarId, webinarName } = body
 
-    if (!webinarId || !webinarName) {
-      return NextResponse.json({ error: 'webinarId and webinarName are required' }, { status: 400 })
+    if (!webinarId) {
+      return NextResponse.json({ error: 'webinarId is required' }, { status: 400 })
     }
 
     // モックモード: Puppeteer/Zoom不要でBotをシミュレーション
