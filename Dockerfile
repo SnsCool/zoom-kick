@@ -31,7 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     dumb-init \
     && ARCH=$(dpkg --print-architecture) \
-    && curl -fsSL "https://github.com/steipete/gogcli/releases/latest/download/gog_linux_${ARCH}" -o /usr/local/bin/gog \
+    && curl -fsSL "https://github.com/steipete/gogcli/releases/download/v0.11.0/gogcli_0.11.0_linux_${ARCH}.tar.gz" \
+       | tar -xz -C /usr/local/bin gog \
     && chmod +x /usr/local/bin/gog \
     && rm -rf /var/lib/apt/lists/*
 
@@ -43,9 +44,9 @@ ENV NEXT_TELEMETRY_DISABLED=1
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
-# 非root ユーザーで実行
+# 非root ユーザーで実行（ホームディレクトリ作成）
 RUN groupadd --system --gid 1001 nodejs && \
-    useradd --system --uid 1001 nextjs
+    useradd --system --uid 1001 --create-home --home-dir /home/nextjs nextjs
 
 # ビルド成果物をコピー
 COPY --from=builder /app/public ./public
@@ -54,10 +55,14 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=deps /app/node_modules ./node_modules
 COPY --from=builder /app/package.json ./package.json
 
+# エントリポイントスクリプト
+COPY --chown=nextjs:nodejs scripts/docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
+
 USER nextjs
 
 EXPOSE 3000
 
-# dumb-init でシグナルを適切にハンドリング
-ENTRYPOINT ["dumb-init", "--"]
+# dumb-init でシグナルを適切にハンドリング + gog セットアップ
+ENTRYPOINT ["dumb-init", "--", "docker-entrypoint.sh"]
 CMD ["node", "server.js"]
