@@ -1,25 +1,22 @@
-// src/bot/worker.ts - メインBotクラス
-import puppeteer, { Browser, Page } from 'puppeteer';
+// src/bot/worker.ts - メインBotクラス（Zoom API + WebSocket ベース）
+
 import { BotConfig, ChatMessage, ModerationResult, ModLog, BanRecord } from '@/types';
 import { moderateWithAI } from '@/lib/gemini';
 import { checkNgWords } from '@/lib/ng-word-checker';
 import { GoogleSheetsLogger } from '@/lib/google-sheets';
-
 import { supabaseAdmin } from '@/lib/supabase';
-import { setupChatMonitoring } from './chat-monitor';
-import { deleteMessage, kickUser, openChatPanel } from './actions';
-import { startParticipantMonitoring, stopParticipantMonitoring } from './participant-monitor';
+import { deleteChatMessage, removeParticipant, getParticipants } from '@/lib/zoom-api';
+import { ZoomWebSocketClient, ZoomChatEvent, ZoomParticipantEvent } from '@/lib/zoom-websocket';
 
 export class ZoomModBot {
-  private browser: Browser | null = null;
-  private page: Page | null = null;
   private config: BotConfig;
+  private wsClient: ZoomWebSocketClient | null = null;
   private isRunning = false;
   private chatHistory: string[] = [];
   private processedMessages = new Set<string>();
   private bannedUsernames = new Set<string>();
   private sheetsLogger: GoogleSheetsLogger | null = null;
-  private participantInterval: NodeJS.Timeout | null = null;
+  private participantCheckInterval: NodeJS.Timeout | null = null;
   private processedCount = 0;
   private startedAt: string | null = null;
 
@@ -36,22 +33,13 @@ export class ZoomModBot {
     try {
       this.startedAt = new Date().toISOString();
       this.isRunning = true;
+      console.log('[Bot] Starting Zoom Mod Bot (API mode)...');
 
-      console.log('[Bot] Starting Zoom Mod Bot...');
-
-      await this.launchBrowser();
-      await this.loginToZoom();
-      await this.joinWebinar();
-
-      if (!this.page) throw new Error('Page not initialized');
-
-      await openChatPanel(this.page);
-
-      // BAN済みユーザーをセットに追加（Supabase blacklist から）
+      // BAN済みユーザーをロード
       this.config.bannedUsers.forEach(u => this.bannedUsernames.add(u.zoom_username));
       console.log(`[Bot] Loaded ${this.config.bannedUsers.length} banned users from Supabase.`);
 
-      // Google Sheets ロガー初期化 + BAN者リストをマージ
+      // Google Sheets ロガー初期化
       if (this.config.sheetsSync) {
         const spreadsheetId = process.env.GOOGLE_SHEETS_SPREADSHEET_ID;
         if (spreadsheetId) {
@@ -59,7 +47,6 @@ export class ZoomModBot {
           await this.sheetsLogger.init();
           console.log('[Bot] Google Sheets Logger initialized.');
 
-          // Sheets からも BAN 者リストを取得してマージ（バックアップ）
           try {
             const sheetsBannedUsers = await this.sheetsLogger.getBannedUsers();
             let newFromSheets = 0;
@@ -67,8 +54,6 @@ export class ZoomModBot {
               if (!this.bannedUsernames.has(user.zoom_username)) {
                 this.bannedUsernames.add(user.zoom_username);
                 newFromSheets++;
-
-                // Supabase に存在しない BAN 者を同期保存
                 await supabaseAdmin.from('blacklist').upsert({
                   zoom_username: user.zoom_username,
                   zoom_email: user.zoom_email,
@@ -88,40 +73,40 @@ export class ZoomModBot {
 
       console.log(`[Bot] Total banned users: ${this.bannedUsernames.size}`);
 
-      // チャット監視開始
-      const monitoringHandler = async (msg: ChatMessage) => {
-        await this.handleMessage(msg);
-      };
-
-      try {
-        await setupChatMonitoring(this.page, monitoringHandler);
-      } catch (err) {
-        console.warn('[Bot] Chat monitoring setup failed:', err);
+      // WebSocket 接続
+      const wsUrl = process.env.ZOOM_WEBSOCKET_URL;
+      if (!wsUrl) {
+        throw new Error('ZOOM_WEBSOCKET_URL が未設定');
       }
 
-      // 参加者監視開始
-      this.participantInterval = startParticipantMonitoring(
-        this.page,
-        this.bannedUsernames,
-        async (username) => {
-          console.log(`[Bot] Re-blocked user detected: ${username}`);
-          const log: ModLog = {
-            webinar_id: this.config.webinarId,
-            webinar_name: this.config.webinarName,
-            username,
-            message: '(再入室検知)',
-            action: 're-blocked',
-            detection_method: 'blacklist',
-            ai_score: 0,
-            ai_reason: '再入室ブロック',
-            ai_category: '',
-            matched_word: null,
-          };
-          await this.saveLog(log);
-        }
-      );
+      this.wsClient = new ZoomWebSocketClient(wsUrl);
 
-      console.log('[Bot] Bot started successfully.');
+      // チャットメッセージハンドラ
+      this.wsClient.onChat((event: ZoomChatEvent) => {
+        this.handleChatEvent(event).catch(err => {
+          console.error('[Bot] Chat event handling error:', err);
+        });
+      });
+
+      // 参加者参加ハンドラ（再入室ブロック）
+      if (this.config.blockReentry) {
+        this.wsClient.onParticipant((event: ZoomParticipantEvent) => {
+          this.handleParticipantJoined(event).catch(err => {
+            console.error('[Bot] Participant event handling error:', err);
+          });
+        });
+      }
+
+      await this.wsClient.connect();
+
+      // 定期的な参加者チェック（WebSocket イベントのバックアップ）
+      if (this.config.blockReentry) {
+        this.participantCheckInterval = setInterval(async () => {
+          await this.checkBannedParticipants();
+        }, 30000); // 30秒ごと
+      }
+
+      console.log('[Bot] Bot started successfully (API mode).');
     } catch (error) {
       console.error('[Bot] Failed to start bot:', error);
       this.isRunning = false;
@@ -134,16 +119,16 @@ export class ZoomModBot {
     console.log('[Bot] Stopping bot...');
     this.isRunning = false;
 
-    if (this.participantInterval) {
-      stopParticipantMonitoring(this.participantInterval);
-      this.participantInterval = null;
+    if (this.participantCheckInterval) {
+      clearInterval(this.participantCheckInterval);
+      this.participantCheckInterval = null;
     }
 
-    if (this.browser) {
-      await this.browser.close();
-      this.browser = null;
-      this.page = null;
+    if (this.wsClient) {
+      this.wsClient.disconnect();
+      this.wsClient = null;
     }
+
     console.log('[Bot] Bot stopped.');
   }
 
@@ -157,68 +142,109 @@ export class ZoomModBot {
     };
   }
 
-  private async launchBrowser(): Promise<void> {
-    console.log('[Bot] Launching browser...');
-    this.browser = await puppeteer.launch({
-      headless: process.env.PUPPETEER_HEADLESS !== 'false',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--use-fake-ui-for-media-stream',
-        '--disable-dev-shm-usage',
-      ],
-    });
+  /**
+   * WebSocket から受信したチャットイベントを処理
+   */
+  private async handleChatEvent(event: ZoomChatEvent): Promise<void> {
+    if (!this.isRunning) return;
 
-    this.page = await this.browser.newPage();
-    await this.page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Safari/537.36'
-    );
+    const obj = event.payload?.object;
+    if (!obj) return;
+
+    // メッセージ情報を抽出（複数フォーマットに対応）
+    const messageId = obj.message?.id || '';
+    const messageText = obj.message?.message || obj.message_content || '';
+    const username = obj.participant?.user_name || obj.message?.sender || '';
+    const participantId = obj.participant?.id || obj.participant?.user_id || '';
+
+    if (!messageText || !username) {
+      console.log('[Bot] 不完全なチャットイベント、スキップ');
+      return;
+    }
+
+    const msg: ChatMessage = {
+      username,
+      message: messageText,
+      msgId: messageId || `${username}-${Date.now()}`,
+      timestamp: new Date(),
+    };
+
+    await this.handleMessage(msg, participantId, messageId);
   }
 
-  private async loginToZoom(): Promise<void> {
-    if (!this.page) throw new Error('Page is not available');
-    console.log('[Bot] Logging in to Zoom...');
-    await this.page.goto('https://zoom.us/signin', { waitUntil: 'networkidle2' });
+  /**
+   * 参加者参加イベントを処理（再入室ブロック）
+   */
+  private async handleParticipantJoined(event: ZoomParticipantEvent): Promise<void> {
+    if (!this.isRunning) return;
 
-    await this.page.type('#email', this.config.zoomEmail);
-    await this.page.type('#password', this.config.zoomPassword);
+    const participant = event.payload?.object?.participant;
+    if (!participant) return;
 
-    await Promise.all([
-      this.page.waitForNavigation({ waitUntil: 'networkidle2' }),
-      this.page.click('button[type="submit"]'),
-    ]);
+    const username = participant.user_name;
+    const participantId = participant.id || participant.user_id;
+    const meetingId = event.payload.object.id;
 
-    console.log('[Bot] Logged in.');
-  }
+    if (this.bannedUsernames.has(username)) {
+      console.log(`[Bot] BAN済みユーザー再入室検知: ${username}`);
 
-  private async joinWebinar(): Promise<void> {
-    if (!this.page) throw new Error('Page is not available');
-    console.log('[Bot] Joining webinar...');
-    const url = `https://zoom.us/wc/join/${this.config.webinarId}`;
-    await this.page.goto(url, { waitUntil: 'networkidle2' });
+      await removeParticipant(meetingId, participantId);
 
-    try {
-      await this.page.waitForSelector('input[name="uname"]', { timeout: 5000 });
-      await this.page.type('input[name="uname"]', 'Moderation Bot');
-
-      await Promise.all([
-        this.page.waitForNavigation({ waitUntil: 'load' }),
-        this.page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button'));
-          const joinBtn = buttons.find(b => b.textContent?.includes('Join'));
-          if (joinBtn) joinBtn.click();
-        }),
-      ]);
-
-      await new Promise(resolve => setTimeout(resolve, 8000));
-      console.log('[Bot] Joined webinar.');
-    } catch {
-      console.log('[Bot] Join inputs not found or already joined.');
+      const log: ModLog = {
+        webinar_id: this.config.webinarId,
+        webinar_name: this.config.webinarName,
+        username,
+        message: '(再入室検知)',
+        action: 're-blocked',
+        detection_method: 'blacklist',
+        ai_score: 0,
+        ai_reason: '再入室ブロック',
+        ai_category: '',
+        matched_word: null,
+      };
+      await this.saveLog(log);
     }
   }
 
-  private async handleMessage(msg: ChatMessage): Promise<void> {
-    if (!this.isRunning || !this.page) return;
+  /**
+   * 定期的にBAN済みユーザーが参加者リストにいないかチェック
+   */
+  private async checkBannedParticipants(): Promise<void> {
+    if (!this.isRunning || this.bannedUsernames.size === 0) return;
+
+    try {
+      const participants = await getParticipants(this.config.webinarId);
+
+      for (const p of participants) {
+        if (this.bannedUsernames.has(p.user_name)) {
+          console.log(`[Bot] BAN済みユーザー発見（定期チェック）: ${p.user_name}`);
+          await removeParticipant(this.config.webinarId, p.id);
+
+          const log: ModLog = {
+            webinar_id: this.config.webinarId,
+            webinar_name: this.config.webinarName,
+            username: p.user_name,
+            message: '(定期チェックで検知)',
+            action: 're-blocked',
+            detection_method: 'blacklist',
+            ai_score: 0,
+            ai_reason: '再入室ブロック（定期チェック）',
+            ai_category: '',
+            matched_word: null,
+          };
+          await this.saveLog(log);
+        }
+      }
+    } catch (error) {
+      console.error('[Bot] 参加者チェックエラー:', error);
+    }
+  }
+
+  /**
+   * メッセージをモデレーションパイプラインで処理
+   */
+  private async handleMessage(msg: ChatMessage, participantId: string, messageId: string): Promise<void> {
+    if (!this.isRunning) return;
 
     // 重複チェック
     if (this.processedMessages.has(msg.msgId)) return;
@@ -241,7 +267,9 @@ export class ZoomModBot {
         msg.message,
         { score: 1.0, category: 'hate', reason: `NGワード検出: ${ngMatch.matchedWord}` },
         ngMatch.matchedWord,
-        'ngword'
+        'ngword',
+        participantId,
+        messageId
       );
       return;
     }
@@ -250,12 +278,12 @@ export class ZoomModBot {
     const aiResult = await moderateWithAI(msg.message, msg.username, this.chatHistory);
 
     if (aiResult.score >= 0.8) {
-      // 高スコア: 削除 + 退出 + BAN + 記録 + 通知
-      await this.takeAction(msg.username, msg.message, aiResult, null, 'ai');
+      // 高スコア: 削除 + 退出 + BAN
+      await this.takeAction(msg.username, msg.message, aiResult, null, 'ai', participantId, messageId);
     } else if (aiResult.score >= this.config.aiThreshold) {
-      // 閾値超え: 削除 + 通知（退出はしない）
-      if (this.config.autoDelete) {
-        await deleteMessage(this.page, msg.message);
+      // 閾値超え: 削除のみ
+      if (this.config.autoDelete && messageId) {
+        await deleteChatMessage(this.config.webinarId, messageId);
       }
       const log: ModLog = {
         webinar_id: this.config.webinarId,
@@ -271,7 +299,7 @@ export class ZoomModBot {
       };
       await this.saveLog(log);
     } else {
-      // パス（ログのみ）
+      // パス
       await this.saveLog({
         webinar_id: this.config.webinarId,
         webinar_name: this.config.webinarName,
@@ -292,23 +320,23 @@ export class ZoomModBot {
     message: string,
     result: ModerationResult,
     matchedWord: string | null,
-    detectionMethod: 'ngword' | 'ai'
+    detectionMethod: 'ngword' | 'ai',
+    participantId: string,
+    messageId: string
   ): Promise<void> {
-    if (!this.page) return;
-
     // メッセージ削除
-    if (this.config.autoDelete) {
+    if (this.config.autoDelete && messageId) {
       try {
-        await deleteMessage(this.page, message);
+        await deleteChatMessage(this.config.webinarId, messageId);
       } catch (e) {
         console.error('[Bot] Delete failed:', e);
       }
     }
 
     // ユーザー退出 + BAN
-    if (this.config.autoKick) {
+    if (this.config.autoKick && participantId) {
       try {
-        await kickUser(this.page, username);
+        await removeParticipant(this.config.webinarId, participantId);
         await this.saveBan(username, message, result, matchedWord);
         this.bannedUsernames.add(username);
       } catch (e) {
@@ -347,7 +375,6 @@ export class ZoomModBot {
     matchedWord: string | null
   ): Promise<void> {
     try {
-      // blacklist テーブルに保存（sheets_synced は後で更新）
       const { data: insertedBan } = await supabaseAdmin.from('blacklist').insert({
         zoom_username: username,
         reason: result.reason,
@@ -362,7 +389,6 @@ export class ZoomModBot {
 
       console.log(`[Bot] Ban saved to Supabase: ${username}`);
 
-      // Google Sheets に記録
       if (this.sheetsLogger) {
         const record: BanRecord = {
           bannedAt: new Date().toLocaleString('ja-JP'),
@@ -383,12 +409,10 @@ export class ZoomModBot {
         };
         await this.sheetsLogger.appendBanRecord(record);
 
-        // Sheets 書き込み成功 → Supabase の sheets_synced を true に更新
         if (insertedBan?.id) {
           await supabaseAdmin.from('blacklist')
             .update({ sheets_synced: true })
             .eq('id', insertedBan.id);
-          console.log(`[Bot] Sheets sync flag updated for: ${username}`);
         }
       }
     } catch (e) {

@@ -53,31 +53,31 @@ export async function POST(req: Request) {
       throw new Error('Failed to fetch blacklist')
     }
 
-    // 4. Supabaseから bot_settings テーブルの設定を取得
+    // 4. Supabaseから bot_settings テーブルの設定を取得（Key-Value形式）
     const { data: settingsData, error: settingsError } = await supabaseAdmin
       .from('bot_settings')
-      .select('*')
-      .limit(1)
-      .single()
+      .select('key, value')
 
-    if (settingsError && settingsError.code !== 'PGRST116') {
+    if (settingsError) {
       console.error('Failed to fetch bot_settings:', settingsError)
       throw new Error('Failed to fetch bot_settings')
     }
 
-    const settings = settingsData
+    // Key-Value → オブジェクトに変換
+    const settings: Record<string, { value: number | boolean }> = {}
+    for (const row of settingsData || []) {
+      settings[row.key] = row.value
+    }
 
     // 5. BotConfig を組み立て
     const config: BotConfig = {
-      zoomEmail: process.env.ZOOM_EMAIL || '',
-      zoomPassword: process.env.ZOOM_PASSWORD || '',
       webinarId,
       webinarName,
-      aiThreshold: settings?.ai_threshold ?? 0.7,
-      autoDelete: settings?.auto_delete ?? true,
-      autoKick: settings?.auto_kick ?? true,
-      blockReentry: settings?.block_reentry ?? true,
-      sheetsSync: settings?.sheets_sync ?? true,
+      aiThreshold: settings.ai_threshold?.value as number ?? 0.7,
+      autoDelete: settings.auto_delete?.value as boolean ?? true,
+      autoKick: settings.auto_kick?.value as boolean ?? true,
+      blockReentry: settings.block_reentry?.value as boolean ?? true,
+      sheetsSync: settings.sheets_sync?.value as boolean ?? true,
       ngWords: (ngWordsData as NgWord[]) || [],
       bannedUsers: (bannedUsersData as BannedUser[]) || [],
     }
@@ -94,11 +94,13 @@ export async function POST(req: Request) {
       setBotInstance(null)
     })
 
-    // 9. webinar 設定を bot_settings に保存
+    // 9. 現在のウェビナー情報を bot_settings に保存（Key-Value形式）
     const { error: updateError } = await supabaseAdmin
       .from('bot_settings')
-      .update({ current_webinar_id: webinarId, current_webinar_name: webinarName })
-      .neq('id', 0)
+      .upsert(
+        { key: 'current_webinar', value: { webinar_id: webinarId, webinar_name: webinarName } },
+        { onConflict: 'key' }
+      )
 
     if (updateError) {
       console.error('Failed to update bot_settings:', updateError)

@@ -14,8 +14,6 @@ export interface NgWord {
 }
 
 export interface BotConfig {
-  zoomEmail: string;
-  zoomPassword: string;
   webinarId: string;
   webinarName: string;
   aiThreshold: number; // 0.0〜1.0

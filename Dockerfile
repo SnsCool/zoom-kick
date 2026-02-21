@@ -21,14 +21,18 @@ RUN npm run build
 FROM node:20-slim AS runner
 WORKDIR /app
 
-# Chromium の依存ライブラリをインストール
+# Chromium の依存ライブラリ + gog CLI インストール
 RUN apt-get update && apt-get install -y --no-install-recommends \
     chromium \
     fonts-ipafont-gothic \
     fonts-noto-cjk \
     fonts-noto-color-emoji \
     ca-certificates \
+    curl \
     dumb-init \
+    && ARCH=$(dpkg --print-architecture) \
+    && curl -fsSL "https://github.com/steipete/gogcli/releases/latest/download/gog_linux_${ARCH}" -o /usr/local/bin/gog \
+    && chmod +x /usr/local/bin/gog \
     && rm -rf /var/lib/apt/lists/*
 
 # Puppeteer がシステムの Chromium を使うように設定

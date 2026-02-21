@@ -1,0 +1,19 @@
+services:
+  bot:
+    build: .
+    ports:
+      - "3000:3000"
+    env_file:
+      - .env.local
+    restart: unless-stopped
+    volumes:
+      # gog CLI の認証トークンをホストから共有（macOS / Linux）
+      - gogcli-config:/home/nextjs/.config/gogcli
+
+volumes:
+  gogcli-config:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${GOG_CONFIG_PATH:-./gog-config}
